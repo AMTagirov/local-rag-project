@@ -1,0 +1,49 @@
+experiment_name: "retrieval_optimization"
+base_config: "src/config/config.yaml"
+dataset: "golden_dataset.json"
+output_dir: "experiment_results"
+
+# Эти параметры не требуют переиндексации: коллекция остаётся одной и той же.
+runs:
+  - name: "hybrid_k4"
+    search_mode: "hybrid"
+    top_n_retrieval: 50
+    top_k: 4
+    use_reranker: true
+
+  - name: "hybrid_k6"
+    search_mode: "hybrid"
+    top_n_retrieval: 50
+    top_k: 6
+    use_reranker: true
+
+  - name: "hybrid_k10"
+    search_mode: "hybrid"
+    top_n_retrieval: 50
+    top_k: 10
+    use_reranker: true
+
+  - name: "dense_k6"
+    search_mode: "dense"
+    top_n_retrieval: 50
+    top_k: 6
+    use_reranker: true
+
+  - name: "sparse_k6"
+    search_mode: "sparse"
+    top_n_retrieval: 50
+    top_k: 6
+    use_reranker: true
+
+  - name: "hybrid_without_reranker"
+    search_mode: "hybrid"
+    top_n_retrieval: 10
+    top_k: 10
+    use_reranker: false
+
+  - name: "hybrid_k10_bge_v2_m3"
+    search_mode: "hybrid"
+    top_n_retrieval: 50
+    top_k: 10
+    use_reranker: true
+    reranker_model: "BAAI/bge-reranker-v2-m3"

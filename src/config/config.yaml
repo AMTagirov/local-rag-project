@@ -1,7 +1,7 @@
 # Основные настройки эксперимента
 experiment_name: "rag_with_reranking_test_top_k=4"
 parser_type: "pdf"
-top_k: 10  # Сколько финальных результатов мы хотим получить на выходе
+top_k: 4  # Сколько финальных результатов мы хотим получить на выходе
 
 # Настройки эмбеддингов
 embedding:
@@ -12,7 +12,7 @@ embedding:
 llm:
   model_name: "qwen2.5:14b"
   base_url: "http://localhost:11434"
-  num_ctx: 16384
+  num_ctx: 8192
   temperature: 0.0                    # Полностью убирает случайность
   top_p: 1.0                          # Отключает стороннюю фильтрацию токенов
   seed: 42     

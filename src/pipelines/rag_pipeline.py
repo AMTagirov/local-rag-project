@@ -37,6 +37,22 @@ class RAGPipeline:
         self.llm = llm
         self.reranker = reranker 
         self.sparse_service = sparse_service
+
+    @staticmethod
+    def build_prompt(question: str, contexts: List[str]) -> str:
+        """Формирует единый RAG-промпт для UI, CLI и оценки."""
+        context_text = (
+            "\n\n---\n\n".join(contexts)
+            if contexts
+            else "Информация отсутствует."
+        )
+        return (
+            "Используй только предоставленный текст контекста, чтобы ответить на вопрос.\n"
+            "Если в контексте нет ответа, честно скажи, что ты не знаешь.\n\n"
+            f"КОНТЕКСТ:\n{context_text}\n\n"
+            f"ВОПРОС: {question}\n\n"
+            "ОТВЕТ:"
+        )
         
     def sync_directory(self, force_recreate: bool = False):
         """
@@ -148,7 +164,8 @@ class RAGPipeline:
                         vector=vector_dict,
                         payload={
                             "text": chunk,
-                            "file_name": file_name
+                            "file_name": file_name,
+                            "chunk_index": start_idx + i
                         }
                     ))
                     
@@ -169,15 +186,14 @@ class RAGPipeline:
             gc.collect()
         print(f"✅ '{file_name}' успешно загружен и синхронизирован с Qdrant.")
     
-    def query_with_contexts(
+    def query_with_context_records(
         self, 
         question: str, 
         collection_name: Optional[str] = None, 
         top_k: Optional[int] = None
-    ) -> Tuple[None, List[str], Dict[str, float]]:
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
         """
-        Улучшенный поиск с использованием Reranking, оптимизированный под стриминг Chainlit.
-        Возвращает список текстовых контекстов и задержки этапов.
+        Возвращает отранжированные контексты вместе с метаданными и задержками.
         """
         target_collection = collection_name or self.config.vector_store.collection_name
         actual_top_k = top_k if top_k is not None else self.config.top_k
@@ -199,10 +215,19 @@ class RAGPipeline:
             )
             latencies['retrieval_time'] = time.perf_counter() - start_step
 
+            initial_records = []
+            for result in initial_results:
+                payload = result.payload or {}
+                initial_records.append({
+                    "text": payload.get("text", ""),
+                    "file_name": payload.get("file_name"),
+                    "chunk_index": payload.get("chunk_index"),
+                })
+
             # 2. РЕРАНКИРОВАНИЕ (Reranking)
             start_step = time.perf_counter()
-            if self.reranker and self.config.reranker.use_reranker and initial_results:
-                passages = [res.payload.get("text", "") for res in initial_results if res.payload]
+            if self.reranker and self.config.reranker.use_reranker and initial_records:
+                passages = [record["text"] for record in initial_records]
                 
                 # Вызываем вашу модель реранкера
                 reranked_output = self.reranker.rerank(question, passages)
@@ -210,25 +235,39 @@ class RAGPipeline:
                 # Безопасная проверка: если реранкер возвращает индексы (int), собираем по индексам.
                 # Если он возвращает уже отсортированные строки (str), берем их напрямую.
                 if reranked_output and isinstance(reranked_output[0], int):
-                    context_list = [passages[idx] for idx in reranked_output[:actual_top_k]]
+                    context_records = [initial_records[idx] for idx in reranked_output[:actual_top_k]]
                 else:
-                    context_list = reranked_output[:actual_top_k]
+                    context_records = [
+                        {"text": text, "file_name": None, "chunk_index": None}
+                        for text in reranked_output[:actual_top_k]
+                    ]
                     
                 latencies['reranker_time'] = time.perf_counter() - start_step
             else:
-                context_list = [res.payload.get("text", "") for res in initial_results if res.payload][:actual_top_k]
+                context_records = initial_records[:actual_top_k]
                 latencies['reranker_time'] = 0.0
 
             # 3. ФИКСАЦИЯ ИТОГОВЫХ ЗАДЕРЖЕК ПОИСКА
             latencies['context_assembly_time'] = 0.0  # Для совместимости с логами
             latencies['total_time'] = time.perf_counter() - start_total
             
-            # Возвращаем None вместо ответа LLM, так как генерация уходит в app.py (Chainlit)
-            return None, context_list, latencies
+            return context_records, latencies
 
         except Exception as e:
             print(f"❌ Ошибка в query_with_contexts: {e}")
             raise e
+
+    def query_with_contexts(
+        self,
+        question: str,
+        collection_name: Optional[str] = None,
+        top_k: Optional[int] = None,
+    ) -> Tuple[None, List[str], Dict[str, float]]:
+        """Сохраняет прежний API для Chainlit и CLI."""
+        records, latencies = self.query_with_context_records(
+            question, collection_name, top_k
+        )
+        return None, [record["text"] for record in records], latencies
 
     def query(self, question: str, collection_name: Optional[str] = None) -> str:
         """
@@ -242,7 +281,6 @@ class RAGPipeline:
         print(f"\n{'='*20} 🔍 НАЙДЕННЫЙ КОНТЕКСТ (Top-{len(context_list)}) {'='*20}")
         if not context_list:
             print("⚠️ Релевантный контекст не найден в базе данных.")
-            context = "Информация отсутствует."
         else:
             for idx, text in enumerate(context_list, 1):
                 preview_text = text if len(text) <= 400 else f"{text[:400]}..."
@@ -250,17 +288,10 @@ class RAGPipeline:
                 print(f"{'-'*60}")
                 print(preview_text)
                 print(f"{'-'*60}")
-            context = "\n---\n".join(context_list)
         
         # 3. ЛОКАЛЬНАЯ ГЕНЕРАЦИЯ ДЛЯ КОНСОЛИ
         start_step = time.perf_counter()
-        prompt = (
-            f"Используй только предоставленный контекст, чтобы ответить на вопрос. "
-            f"Если в контексте нет ответа, скажи, что ты не знаешь.\n\n"
-            f"КОНТЕКСТ:\n{context}\n\n"
-            f"ВОПРОС:\n{question}\n\n"
-            f"ОТВЕТ:"
-        )
+        prompt = self.build_prompt(question, context_list)
         response = self.llm.generate(prompt)
         latencies['generation_time'] = time.perf_counter() - start_step
         latencies['total_time'] += latencies['generation_time']

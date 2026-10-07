@@ -1,12 +1,68 @@
+import argparse
 import json
 import os
 import random
+import sys
+from collections import defaultdict
+from pathlib import Path
 from typing import List, Dict, Any
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config.schema import RAGConfig
 from src.services.embedding_service import EmbeddingService
 from src.services.vector_store_service import QdrantService
 from src.services.llm_service import OllamaLLMService
+
+
+def select_stratified_targets(
+    records_by_file: Dict[str, List[Dict[str, Any]]],
+    num_questions: int,
+    seed: int = 42,
+    num_strata: int = 3,
+) -> List[Dict[str, Any]]:
+    """Равномерно выбирает чанки из разных частей каждого документа."""
+    rng = random.Random(seed)
+    buckets = defaultdict(list)
+
+    for file_name, records in sorted(records_by_file.items()):
+        ordered = sorted(records, key=lambda record: record["chunk_index"])
+        for position, record in enumerate(ordered):
+            stratum = min(num_strata - 1, position * num_strata // len(ordered))
+            buckets[(stratum, file_name)].append(record)
+
+    file_names = sorted(records_by_file)
+    bucket_order = []
+    seen_keys = set()
+    # Чередуем и части документа, и файлы. Даже маленькая выборка
+    # не должна целиком попадать только в начало коллекции.
+    for offset in range(len(file_names)):
+        for stratum in range(num_strata):
+            key = (stratum, file_names[(stratum + offset) % len(file_names)])
+            if key in buckets and key not in seen_keys:
+                bucket_order.append(key)
+                seen_keys.add(key)
+
+    ordered_buckets = []
+    for key in bucket_order:
+        candidates = buckets[key]
+        rng.shuffle(candidates)
+        ordered_buckets.append(candidates)
+
+    selected = []
+    while ordered_buckets and len(selected) < num_questions:
+        remaining_buckets = []
+        for bucket in ordered_buckets:
+            if bucket and len(selected) < num_questions:
+                selected.append(bucket.pop())
+            if bucket:
+                remaining_buckets.append(bucket)
+        ordered_buckets = remaining_buckets
+
+    return selected
+
 
 def generate_synthetic_dataset_from_db(
     config: RAGConfig, 
@@ -32,63 +88,71 @@ def generate_synthetic_dataset_from_db(
 
     print("📦 Выгружаю чанки для выбора случайных...")
     try:
-        # Загружаем пул точек (ограничимся 2000, чтобы не перегружать память, 
-        # но иметь отличную выборку для рандома)
-        points, _ = vector_db.client.scroll(
-            collection_name=collection_name,
-            limit=2000,
-            with_payload=["text", "file_name"], # Забираем только текст и имя файла
-            with_vectors=False                  # Векторы для генерации вопросов нам не нужны
-        )
+        points = []
+        offset = None
+        while True:
+            page, offset = vector_db.client.scroll(
+                collection_name=collection_name,
+                limit=256,
+                offset=offset,
+                with_payload=["text", "file_name", "chunk_index"],
+                with_vectors=False,
+            )
+            points.extend(page)
+            if offset is None:
+                break
     except Exception as e:
         print(f"❌ Не удалось вычитать данные из Qdrant: {e}")
         return
 
     # Структурируем чанки: сохраняем словари, чтобы контролировать, что соседи из одного файла
-    all_records = []
+    records_by_file = defaultdict(list)
+    missing_chunk_index = 0
     for p in points:
         if p.payload and "text" in p.payload and "file_name" in p.payload:
-            all_records.append({
+            if "chunk_index" not in p.payload:
+                missing_chunk_index += 1
+                continue
+            record = {
                 "text": p.payload["text"],
-                "file_name": p.payload["file_name"]
-            })
-            
-    total_records = len(all_records)
-    if total_records < 3:
-        print("⚠️ В базе слишком мало чанков для генерации расширенного контекста.")
+                "file_name": p.payload["file_name"],
+                "chunk_index": int(p.payload["chunk_index"]),
+            }
+            records_by_file[record["file_name"]].append(record)
+
+    if missing_chunk_index:
+        print(
+            f"❌ У {missing_chunk_index} чанков нет chunk_index. "
+            "Переиндексируйте коллекцию перед генерацией датасета."
+        )
         return
 
+    total_records = sum(len(records) for records in records_by_file.values())
+    if not total_records:
+        print("⚠️ В коллекции нет подходящих чанков.")
+        return
+
+    for file_name, records in records_by_file.items():
+        index_map = {record["chunk_index"]: record for record in records}
+        if len(index_map) != len(records):
+            print(
+                f"❌ В файле '{file_name}' есть дублирующиеся chunk_index. "
+                "Переиндексируйте коллекцию."
+            )
+            return
     print(f"📊 Всего доступно чанков: {total_records}")
-    
-    # Чтобы вопросы были разнообразными, выберем случайные индексы-мишени
-    # Исключаем самый первый и самый последний чанк, чтобы у всех гарантированно были соседи
-    possible_indices = list(range(1, total_records - 1))
-    actual_num_questions = min(num_questions, len(possible_indices))
-    target_indices = random.sample(possible_indices, actual_num_questions)
+    target_records = select_stratified_targets(records_by_file, num_questions)
+    actual_num_questions = len(target_records)
     
     golden_dataset: List[Dict[str, Any]] = []
 
-    print(f"🚀 Запуск генерации датасета по {actual_num_questions} расширенным контекстам...")
+    print(f"🚀 Запуск генерации датасета по {actual_num_questions} золотым чанкам...")
 
-    for step, idx in enumerate(target_indices, 1):
-        print(f"📝 Обработка элемента {step}/{actual_num_questions} (Индекс чанка: {idx})...")
-        
-        target_record = all_records[idx]
-        prev_record = all_records[idx - 1]
-        next_record = all_records[idx + 1]
-        
-        # Собираем расширенное контекстное окно
-        # Проверяем, что соседние чанки принадлежат тому же файлу (чтобы не смешивать разные документы)
-        context_window = []
-        
-        if prev_record["file_name"] == target_record["file_name"]:
-            context_window.append(prev_record["text"])
-            
-        context_window.append(target_record["text"]) # Сам "золотой" чанк-мишень
-        
-        if next_record["file_name"] == target_record["file_name"]:
-            context_window.append(next_record["text"])
-
+    for step, target_record in enumerate(target_records, 1):
+        print(
+            f"📝 Обработка {step}/{actual_num_questions} "
+            f"({target_record['file_name']}, чанк {target_record['chunk_index']})..."
+        )
         # Промпт даем строго по целевому чанку, чтобы вопрос был конкретным
         gen_prompt = f"""
         Based on the following text, generate one high-quality question and its detailed answer.
@@ -107,15 +171,18 @@ def generate_synthetic_dataset_from_db(
             response = llm.generate(gen_prompt)
             
             if "QUESTION:" in response and "ANSWER:" in response:
-                parts = response.split("ANSWER:")
-                question_part = parts[0].replace("QUESTION:", "").strip()
-                answer_part = parts[1].strip()
+                question_part, answer_part = response.split("ANSWER:", maxsplit=1)
+                question_part = question_part.removeprefix("QUESTION:").strip()
+                answer_part = answer_part.strip()
 
-                # КРИТИЧЕСКИЙ СДВИГ: В датасет сохраняем всё окно (3 чанка), а не один!
                 golden_dataset.append({
                     "question": question_part,
-                    "contexts": context_window,  # Теперь здесь список из 2-3 смежных чанков
-                    "ground_truth": answer_part 
+                    "contexts": [target_record["text"]],
+                    "ground_truth": answer_part,
+                    "source": {
+                        "file_name": target_record["file_name"],
+                        "chunk_index": target_record["chunk_index"],
+                    },
                 })
             else:
                 print(f"⚠️ Модель нарушила формат. Пропускаю.")
@@ -133,23 +200,23 @@ def generate_synthetic_dataset_from_db(
         print(f"❌ Ошибка при сохранении файла: {e}")
 
 if __name__ == "__main__":
-    CONFIG_PATH = "src/config/config.yaml"
-    OUTPUT_JSON = "golden_dataset.json"
-    MAX_QUESTIONS = 20 
+    parser = argparse.ArgumentParser(
+        description="Генерация golden dataset с одним эталонным чанком"
+    )
+    parser.add_argument("--config", default="src/config/config.yaml")
+    parser.add_argument("--output", default="golden_dataset.json")
+    parser.add_argument("--questions", type=int, default=20)
+    args = parser.parse_args()
 
-    if not os.path.exists(CONFIG_PATH):
-        print(f"❌ Ошибка: Конфигурация не найдена: {CONFIG_PATH}")
-    else:
-        # Загружаем основной конфиг
-        rag_config = RAGConfig.from_yaml(CONFIG_PATH)
-        
-        # Имя коллекции вытягиваем из конфига
-        target_collection = rag_config.vector_store.collection_name
-        
-        # Запускаем процесс генерации напрямую из БД
-        generate_synthetic_dataset_from_db(
-            config=rag_config,
-            collection_name=target_collection,
-            output_file=OUTPUT_JSON,
-            num_questions=MAX_QUESTIONS
-        )
+    if not os.path.exists(args.config):
+        parser.error(f"Конфигурация не найдена: {args.config}")
+    if args.questions < 1:
+        parser.error("--questions должен быть больше нуля")
+
+    rag_config = RAGConfig.from_yaml(args.config)
+    generate_synthetic_dataset_from_db(
+        config=rag_config,
+        collection_name=rag_config.vector_store.collection_name,
+        output_file=args.output,
+        num_questions=args.questions,
+    )

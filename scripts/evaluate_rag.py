@@ -1,9 +1,16 @@
+import argparse
 import json
 import os
+import re
 import sys
 import time
+from pathlib import Path
 from types import ModuleType
 from typing import List, Dict, Any, Tuple
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import pandas as pd
 from datasets import Dataset
@@ -40,15 +47,108 @@ def get_rag_predictions(
     pipeline: RAGPipeline, 
     question: str, 
     collection_name: str
-) -> Tuple[str, List[str], Dict[str, float]]:
-    """Возвращает сгенерированный ответ, список контекстов и словарь задержек."""
+) -> Tuple[str, List[str], List[Dict[str, Any]], Dict[str, float]]:
+    """Возвращает ответ, контексты, их ID и задержки."""
     try:
-        return pipeline.query_with_contexts(question, collection_name)
+        context_records, latencies = pipeline.query_with_context_records(
+            question, collection_name
+        )
+        contexts = [record["text"] for record in context_records]
+        retrieved_sources = [
+            {
+                "file_name": record.get("file_name"),
+                "chunk_index": record.get("chunk_index"),
+            }
+            for record in context_records
+        ]
+
+        start_generation = time.perf_counter()
+        prompt = pipeline.build_prompt(question, contexts)
+        answer = pipeline.llm.generate(prompt)
+        generation_time = time.perf_counter() - start_generation
+
+        latencies["generation_time"] = generation_time
+        latencies["total_time"] = latencies.get("total_time", 0.0) + generation_time
+
+        return answer, contexts, retrieved_sources, latencies
     except Exception as e:
         print(f"❌ Ошибка на вопросе '{question[:30]}...': {e}")
-        return "", [], {}
+        return "", [], [], {}
 
-def run_evaluation(config: RAGConfig, dataset_path: str):
+
+def calculate_id_retrieval_metrics(
+    target_source: Dict[str, Any],
+    retrieved_sources: List[Dict[str, Any]],
+) -> Dict[str, float]:
+    """Проверяет попадание единственного золотого чанка в выдачу."""
+    def source_key(source: Dict[str, Any]):
+        file_name = source.get("file_name")
+        chunk_index = source.get("chunk_index")
+        if file_name is None or chunk_index is None:
+            return None
+        return str(file_name), int(chunk_index)
+
+    target_key = source_key(target_source)
+    retrieved_keys = [
+        key for source in retrieved_sources if (key := source_key(source)) is not None
+    ]
+
+    if target_key is None:
+        return {
+            "id_target_hit_at_k": float("nan"),
+            "id_target_mrr": float("nan"),
+        }
+
+    target_rank = next(
+        (rank for rank, key in enumerate(retrieved_keys, start=1) if key == target_key),
+        None,
+    )
+    return {
+        "id_target_hit_at_k": float(target_rank is not None),
+        "id_target_mrr": 1.0 / target_rank if target_rank is not None else 0.0,
+    }
+
+
+def load_single_chunk_dataset(dataset_path: str) -> List[Dict[str, Any]]:
+    """Загружает датасет и проверяет, что у примера ровно один золотой чанк."""
+    with open(dataset_path, "r", encoding="utf-8") as file:
+        data = json.load(file)
+
+    if not isinstance(data, list) or not data:
+        raise ValueError("Золотой датасет должен быть непустым JSON-массивом")
+
+    errors = []
+    for row_number, item in enumerate(data, start=1):
+        contexts = item.get("contexts")
+        source = item.get("source")
+        if not item.get("question") or not item.get("ground_truth"):
+            errors.append(f"строка {row_number}: нет question или ground_truth")
+        if (
+            not isinstance(contexts, list)
+            or len(contexts) != 1
+            or not isinstance(contexts[0], str)
+            or not contexts[0].strip()
+        ):
+            errors.append(f"строка {row_number}: contexts должен содержать ровно один текст")
+        if not isinstance(source, dict) or source.get("file_name") is None or source.get("chunk_index") is None:
+            errors.append(f"строка {row_number}: нет source.file_name/chunk_index")
+
+    if errors:
+        preview = "; ".join(errors[:5])
+        suffix = f"; ещё ошибок: {len(errors) - 5}" if len(errors) > 5 else ""
+        raise ValueError(
+            "Датасет не соответствует схеме одного золотого чанка: "
+            f"{preview}{suffix}. Пересоздайте golden dataset."
+        )
+    return data
+
+def run_evaluation(
+    config: RAGConfig,
+    dataset_path: str,
+    run_name: str | None = None,
+    output_dir: str = "evaluation_reports",
+    metrics_output: str | None = None,
+) -> Dict[str, float] | None:
     """
     Запускает процесс оценки RAG системы с использованием Ragas и MLflow.
     """
@@ -57,6 +157,12 @@ def run_evaluation(config: RAGConfig, dataset_path: str):
     
     if not os.path.exists(dataset_path):
         print(f"❌ Файл датасета {dataset_path} не найден.")
+        return
+
+    try:
+        golden_data = load_single_chunk_dataset(dataset_path)
+    except (OSError, json.JSONDecodeError, ValueError) as error:
+        print(f"❌ Ошибка золотого датасета: {error}")
         return
 
     client = MlflowClient()
@@ -77,6 +183,10 @@ def run_evaluation(config: RAGConfig, dataset_path: str):
     # Имя коллекции берем из конфига
     collection_name = config.vector_store.collection_name
     llm_model_name = config.llm.model_name
+    effective_run_name = run_name or f"eval_{llm_model_name.replace(':', '_')}"
+    run_slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", effective_run_name).strip("_")
+    report_dir = Path(output_dir) / run_slug
+    report_dir.mkdir(parents=True, exist_ok=True)
 
     # Гарантированная инициализация парсера на основе конфига
     if config.parser_type == "pdf":
@@ -86,10 +196,21 @@ def run_evaluation(config: RAGConfig, dataset_path: str):
 
     print(f"🧪 Запуск оценки для модели {llm_model_name} на коллекции '{collection_name}'")
     
-    with mlflow.start_run(run_name=f"eval_{llm_model_name.replace(':', '_')}"):
-        mlflow.log_param("llm_model", llm_model_name)
-        mlflow.log_param("collection", collection_name)
-        mlflow.log_param("parser_type", config.parser_type) 
+    with mlflow.start_run(run_name=effective_run_name):
+        mlflow.log_params({
+            "llm_model": llm_model_name,
+            "collection": collection_name,
+            "parser_type": config.parser_type,
+            "embedding_model": config.embedding.model_name,
+            "chunking_strategy": config.splitter.strategy.value,
+            "chunk_size": config.splitter.chunk_size,
+            "chunk_overlap": config.splitter.chunk_overlap,
+            "search_mode": config.vector_store.search_mode.value,
+            "top_k": config.top_k,
+            "use_reranker": config.reranker.use_reranker,
+            "reranker_model": config.reranker.model_name,
+            "top_n_retrieval": config.reranker.top_n_retrieval,
+        })
         
         # --- 1. ИНИЦИАЛИЗАЦИЯ ПАЙПЛАЙНА (ОПТИМИЗИРОВАНО: Сквозные зависимости интерфейсов) ---
         embedder = EmbeddingService(config.embedding)
@@ -97,7 +218,11 @@ def run_evaluation(config: RAGConfig, dataset_path: str):
         vector_db = QdrantService(config.vector_store, embedder=embedder)
         sparse_embedder = SparseEmbeddingService() 
         llm = OllamaLLMService(config.llm)
-        reranker = RerankerService(config.reranker)
+        reranker = (
+            RerankerService(config.reranker)
+            if config.reranker.use_reranker
+            else None
+        )
 
         pipeline = RAGPipeline(
             config=config,
@@ -111,8 +236,6 @@ def run_evaluation(config: RAGConfig, dataset_path: str):
         )
 
         # --- 2. ЗАГРУЗКА ЗОЛОТОГО ДАТАСЕТА ---
-        with open(dataset_path, "r", encoding="utf-8") as f:
-            golden_data = json.load(f)
         print(f"📖 Загружено {len(golden_data)} примеров из датасета.")
 
         # --- 3. ИНИЦИАЛИЗАЦИЯ СУДЕЙ (Сохранено без изменений) ---
@@ -138,6 +261,7 @@ def run_evaluation(config: RAGConfig, dataset_path: str):
 
         all_latencies = [] 
         evaluation_rows = [] 
+        id_metric_rows = []
 
         # --- 4. ОПТИМИЗИРОВАННЫЙ ЦИКЛ СБОРА ОТВЕТОВ ---
         for i, item in enumerate(golden_data):
@@ -146,7 +270,13 @@ def run_evaluation(config: RAGConfig, dataset_path: str):
             reference_str = gt[0] if isinstance(gt, list) else str(gt)
 
             print(f"   [Строка {i+1}/{len(golden_data)}] Генерация ответа RAG пайплайном...")
-            ans, contexts, latencies = get_rag_predictions(pipeline, q, collection_name)
+            ans, contexts, retrieved_sources, latencies = get_rag_predictions(
+                pipeline, q, collection_name
+            )
+
+            if not ans.strip():
+                print(f"⚠️ Пропуск строки {i+1}: LLM не вернула ответ.")
+                continue
             
             if latencies:
                 all_latencies.append(latencies)
@@ -155,9 +285,27 @@ def run_evaluation(config: RAGConfig, dataset_path: str):
             evaluation_rows.append({
                 "question": q,
                 "contexts": contexts,
+                "reference_contexts": item["contexts"],
                 "reference": reference_str,
                 "answer": ans
             })
+            id_metric_rows.append(calculate_id_retrieval_metrics(
+                item.get("source", {}),
+                retrieved_sources,
+            ))
+
+        if not evaluation_rows:
+            print("❌ Нет успешно сгенерированных ответов для оценки.")
+            return
+
+        if all(
+            row["id_target_hit_at_k"] != row["id_target_hit_at_k"]
+            for row in id_metric_rows
+        ):
+            print(
+                "⚠️ ID-метрики не будут рассчитаны: в датасете или коллекции "
+                "нет file_name/chunk_index. Переиндексируйте коллекцию и пересоздайте датасет."
+            )
 
         # Создаем финальный датасет для Ragas
         ragas_dataset = Dataset.from_pandas(pd.DataFrame(evaluation_rows))
@@ -191,35 +339,44 @@ def run_evaluation(config: RAGConfig, dataset_path: str):
             return
 
         print("📊 Сборка финальных результатов...")
+
+        for metric_name in id_metric_rows[0]:
+            final_df[metric_name] = [row[metric_name] for row in id_metric_rows]
         
         numeric_cols = final_df.select_dtypes(include=['number'])
-        final_metrics_dict = numeric_cols.mean().to_dict()
+        final_metrics_dict = numeric_cols.mean().dropna().to_dict()
         
-        if "contexts" in final_df.columns:
-            final_df["contexts_formatted"] = final_df["contexts"].apply(
+        contexts_column = (
+            "retrieved_contexts" if "retrieved_contexts" in final_df.columns else "contexts"
+        )
+        if contexts_column in final_df.columns:
+            final_df["contexts_formatted"] = final_df[contexts_column].apply(
                 lambda c: "\n\n".join([f"[{idx+1}] {text}" for idx, text in enumerate(c)]) if isinstance(c, list) else str(c)
             )
 
         readable_cols = []
-        for col in ["question", "reference", "answer", "contexts_formatted"]:
+        for col in ["user_input", "question", "reference", "response", "answer", "contexts_formatted"]:
             if col in final_df.columns:
                 readable_cols.append(col)
         
-        other_cols = [c for c in final_df.columns if c not in readable_cols and c != "contexts"]
+        other_cols = [
+            c for c in final_df.columns
+            if c not in readable_cols and c not in {"contexts", "retrieved_contexts"}
+        ]
         report_df = final_df[readable_cols + other_cols]
 
-        report_csv_path = "evaluation_report_detailed.csv"
+        report_csv_path = report_dir / "evaluation_report_detailed.csv"
         report_df.to_csv(report_csv_path, index=False, encoding="utf-8-sig")
         
-        report_xlsx_path = "evaluation_report_detailed.xlsx"
+        report_xlsx_path = report_dir / "evaluation_report_detailed.xlsx"
         try:
             report_df.to_excel(report_xlsx_path, index=False, engine='xlsxwriter')
         except ImportError:
             print("⚠️ Библиотека 'xlsxwriter' не найдена. Сохраняю стандартным движком...")
             report_df.to_excel(report_xlsx_path, index=False)
         
-        mlflow.log_artifact(report_csv_path)
-        mlflow.log_artifact(report_xlsx_path)
+        mlflow.log_artifact(str(report_csv_path))
+        mlflow.log_artifact(str(report_xlsx_path))
         print(f"📄 Детальный отчет сохранен в: {report_csv_path} и {report_xlsx_path}")
 
         print("📥 Отправка интерактивной таблицы результатов в MLflow...")
@@ -249,18 +406,41 @@ def run_evaluation(config: RAGConfig, dataset_path: str):
                 print(f"   {k.replace('latency_', '')}: {v:.4f}s")
 
         mlflow.log_metrics(final_metrics_dict)
+
+        combined_metrics = {**final_metrics_dict, **avg_latencies}
+        if metrics_output:
+            metrics_path = Path(metrics_output)
+            metrics_path.parent.mkdir(parents=True, exist_ok=True)
+            metrics_path.write_text(
+                json.dumps(combined_metrics, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
         
     print("\n✅ Оценка успешно завершена! Всё залогировано в MLflow.")
+    return combined_metrics
 
 
 if __name__ == "__main__":
-    CONFIG_FILE = "src/config/config.yaml"
-    DATASET_FILE = "golden_dataset.json"
+    parser = argparse.ArgumentParser(description="Оценка RAG и логирование в MLflow")
+    parser.add_argument("--config", default="src/config/config.yaml")
+    parser.add_argument("--dataset", default="golden_dataset.json")
+    parser.add_argument("--run-name")
+    parser.add_argument("--output-dir", default="evaluation_reports")
+    parser.add_argument("--metrics-output")
+    args = parser.parse_args()
 
-    if not os.path.exists(CONFIG_FILE):
-        print(f"❌ Конфиг не найден: {CONFIG_FILE}")
-    elif not os.path.exists(DATASET_FILE):
-        print(f"❌ Датасет не найден: {DATASET_FILE}")
-    else:
-        app_config = RAGConfig.from_yaml(CONFIG_FILE)
-        run_evaluation(app_config, DATASET_FILE)
+    if not os.path.exists(args.config):
+        parser.error(f"Конфиг не найден: {args.config}")
+    if not os.path.exists(args.dataset):
+        parser.error(f"Датасет не найден: {args.dataset}")
+
+    app_config = RAGConfig.from_yaml(args.config)
+    metrics = run_evaluation(
+        app_config,
+        args.dataset,
+        run_name=args.run_name,
+        output_dir=args.output_dir,
+        metrics_output=args.metrics_output,
+    )
+    if metrics is None:
+        raise SystemExit(1)

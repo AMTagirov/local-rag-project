@@ -75,8 +75,10 @@ class QdrantService(VectorStore):
         collection_name = name or self.config.collection_name
         try:
             return self.client.collection_exists(collection_name)
-        except Exception:
-            return False
+        except Exception as e:
+            raise RuntimeError(
+                f"Не удалось проверить коллекцию '{collection_name}' в Qdrant: {e}"
+            ) from e
 
     def upsert(self, collection_name: Optional[str] = None, points: List[PointStruct] = None) -> None:
         target_collection = collection_name or self.config.collection_name
@@ -200,7 +202,6 @@ class QdrantService(VectorStore):
             except Exception as e:
                 print(f"⚠️ Ошибка при проверке существующих файлов: {e}")
                 return set()        
-
 
 
 

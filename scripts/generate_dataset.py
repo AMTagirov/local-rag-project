@@ -1,16 +1,33 @@
 import json
 import os
+import random
 from typing import List, Dict, Any
-from itertools import islice
 
 from src.config.schema import RAGConfig
 from src.services.document_parser import PDFDocumentParser
 from src.services.text_splitter import ChunkTextSplitter
 from src.services.embedding_service import EmbeddingService
-from src.services.vector_store_service import QdrantService
 from src.services.llm_service import OllamaLLMService
-from src.pipelines.rag_pipeline import RAGPipeline
-from src.services.sparse_embedding_service import SparseEmbeddingService
+
+
+def select_stratified_chunks(
+    chunks: List[str],
+    num_chunks: int,
+    seed: int = 42,
+) -> List[tuple[int, str]]:
+    """Берёт по одному чанку из равных частей документа."""
+    sample_size = min(num_chunks, len(chunks))
+    if sample_size == 0:
+        return []
+
+    rng = random.Random(seed)
+    selected_indices = []
+    for stratum in range(sample_size):
+        start = stratum * len(chunks) // sample_size
+        end = (stratum + 1) * len(chunks) // sample_size
+        selected_indices.append(rng.randrange(start, end))
+
+    return [(index, chunks[index]) for index in selected_indices]
 
 def generate_synthetic_dataset(
     config: RAGConfig, 
@@ -27,23 +44,9 @@ def generate_synthetic_dataset(
     parser = PDFDocumentParser()
     embedder = EmbeddingService(config.embedding)
     
-    # Передаем embedder в сплиттер и векторное хранилище
+    # Передаем embedder в семантический сплиттер.
     splitter = ChunkTextSplitter(config.splitter, embedder=embedder)
-    vector_db = QdrantService(config.vector_store, embedder=embedder)
-    
-    sparse_embedder = SparseEmbeddingService()
     llm = OllamaLLMService(config.llm)
-
-    # Инициализируем пайплайн со всеми необходимыми зависимостями
-    pipeline = RAGPipeline(
-        config=config,
-        parser=parser,
-        splitter=splitter,
-        embedder=embedder,
-        vector_store=vector_db,
-        llm=llm,
-        sparse_service=sparse_embedder
-    )
 
     # --- 2. ПОДГОТОВКА ПОТОКА ТЕКСТА (ИСПРАВЛЕНО: переход на стриминг) ---
     print(f"📖 Чтение файла в потоковом режиме: {pdf_path}")
@@ -54,8 +57,9 @@ def generate_synthetic_dataset(
     # Получаем ленивый генератор семантических чанков
     chunks_stream = splitter.split_stream(pages_stream)
     
-    # Безопасно откусываем ровно num_chunks чанков без загрузки всего файла в RAM
-    chunks_to_process = list(islice(chunks_stream, num_chunks))
+    # Для стратификации нужно знать полное число чанков в документе.
+    all_chunks = list(chunks_stream)
+    chunks_to_process = select_stratified_chunks(all_chunks, num_chunks)
     
     golden_dataset: List[Dict[str, Any]] = []
     total_to_process = len(chunks_to_process)
@@ -63,7 +67,7 @@ def generate_synthetic_dataset(
     print(f"🚀 Начинаем генерацию датасета из {total_to_process} чанков...")
 
     # --- 3. ЦИКЛ ГЕНЕРАЦИИ ---
-    for i, chunk in enumerate(chunks_to_process):
+    for i, (chunk_index, chunk) in enumerate(chunks_to_process):
         print(f"📝 Обработка чанка {i+1}/{total_to_process}...")
 
         gen_prompt = f"""
@@ -83,14 +87,22 @@ def generate_synthetic_dataset(
             response = llm.generate(gen_prompt)
             
             if "QUESTION:" in response and "ANSWER:" in response:
-                parts = response.split("ANSWER:")
-                question_part = parts[0].replace("QUESTION:", "").strip()
-                answer_part = parts[1].strip()
+                question_part, answer_part = response.split("ANSWER:", maxsplit=1)
+                question_part = question_part.removeprefix("QUESTION:").strip()
+                answer_part = answer_part.strip()
 
                 golden_dataset.append({
                     "question": question_part,
-                    "contexts": [chunk],  
-                    "ground_truth": answer_part 
+                    "contexts": [chunk],
+                    "reference_sources": [{
+                        "file_name": os.path.basename(pdf_path),
+                        "chunk_index": chunk_index,
+                    }],
+                    "ground_truth": answer_part,
+                    "source": {
+                        "file_name": os.path.basename(pdf_path),
+                        "chunk_index": chunk_index,
+                    },
                 })
             else:
                 print(f"⚠️ Предупреждение: Модель не соблюла формат на чанке {i+1}. Ответ: {response[:50]}...")

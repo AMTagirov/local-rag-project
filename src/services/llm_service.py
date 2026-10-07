@@ -1,4 +1,4 @@
-from typing import Generator
+from typing import AsyncGenerator
 import ollama
 from src.core.interfaces import LLMService
 from src.config.schema import LLMConfig
@@ -9,8 +9,10 @@ class OllamaLLMService(LLMService):
         Инициализирует сервис на основе конфигурации.
         """
         self.config = config
-        # Используем Client для возможности указать base_url из конфига
+        # Синхронный клиент используется в CLI и скриптах оценки.
         self.client = ollama.Client(host=config.base_url)
+        # Асинхронный клиент не блокирует event loop Chainlit между токенами.
+        self.async_client = ollama.AsyncClient(host=config.base_url)
 
     def generate(self, prompt: str) -> str:
         """
@@ -32,17 +34,16 @@ class OllamaLLMService(LLMService):
         except Exception as e:
             raise RuntimeError(f"Ошибка при генерации ответа через Ollama: {e}")
 
-    def generate_stream(self, prompt: str) -> Generator[str, None, None]:
+    async def generate_stream(self, prompt: str) -> AsyncGenerator[str, None]:
         """
         Потоковая генерация ответа (будет использоваться в веб-интерфейсе app.py).
         Возвращает генератор токенов по мере их создания моделью Qwen.
         """
         try:
-            # Вызываем generate с флагом stream=True в библиотеке ollama
-            stream = self.client.generate(
+            stream = await self.async_client.generate(
                 model=self.config.model_name,
                 prompt=prompt,
-                stream=True,  # Включаем потоковый режим на стороне Ollama
+                stream=True,
                 options={
                     "num_ctx": self.config.num_ctx,
                     "temperature": getattr(self.config, "temperature", 0.0),
@@ -50,7 +51,7 @@ class OllamaLLMService(LLMService):
                     "seed": getattr(self.config, "seed", 42)
                 }
             )
-            for chunk in stream:
+            async for chunk in stream:
                 yield chunk['response']
                 
         except Exception as e:

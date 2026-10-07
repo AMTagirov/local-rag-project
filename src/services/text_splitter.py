@@ -4,7 +4,7 @@ import re
 from typing import List, Generator, Iterable
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from src.core.interfaces import TextSplitter
-from src.config.schema import SplitterConfig
+from src.config.schema import ChunkingStrategy, SplitterConfig
 from src.core.interfaces import EmbeddingModel
 
 class ChunkTextSplitter(TextSplitter):
@@ -36,6 +36,11 @@ class ChunkTextSplitter(TextSplitter):
         clean_text = text.strip()
         if not clean_text:
             return False
+
+        # Длинная строка без пробелов или в верхнем регистре — это текст,
+        # а не заголовок, даже если в ней мало "слов".
+        if len(clean_text) > 200:
+            return False
             
         # Правило 1: Короткая строка (меньше 12 слов) и начинается с цифр (1., 1.2, Глава 3, Параграф)
         header_patterns = [
@@ -62,8 +67,12 @@ class ChunkTextSplitter(TextSplitter):
 
     def split_stream(self, pages_iterator: Iterable[str]) -> Generator[str, None, None]:
         """
-        Потоково принимает страницы, режет на абзацы и порциями анализирует смысл.
+        Потоково разбивает страницы согласно выбранной стратегии.
         """
+        if self.config.strategy == ChunkingStrategy.RECURSIVE:
+            yield from self._split_recursive_stream(pages_iterator)
+            return
+
         current_paragraphs_block = []
         self.current_header = "Общий контекст"  # Базовый заголовок по умолчанию
 
@@ -89,6 +98,28 @@ class ChunkTextSplitter(TextSplitter):
         if current_paragraphs_block:
             yield from self._process_local_block(current_paragraphs_block)
 
+    def _split_recursive_stream(self, pages_iterator: Iterable[str]) -> Generator[str, None, None]:
+        """Рекурсивно режет поток, сохраняя overlap между страницами."""
+        pending_text = ""
+
+        for page_text in pages_iterator:
+            if not page_text or not page_text.strip():
+                continue
+
+            pending_text = "\n\n".join(
+                part for part in (pending_text, page_text.strip()) if part
+            )
+            chunks = self.fallback_splitter.split_text(pending_text)
+
+            # Последний чанк может ещё вырасти за счёт следующей страницы.
+            # Остальные чанки уже завершены и их можно отдать сразу.
+            if len(chunks) > 1:
+                yield from chunks[:-1]
+                pending_text = chunks[-1]
+
+        if pending_text:
+            yield from self.fallback_splitter.split_text(pending_text)
+
     def _process_local_block(self, paragraphs: List[str]) -> Generator[str, None, None]:
         """Локальный семантический анализ пачки абзацев."""
         if len(paragraphs) == 0:
@@ -96,9 +127,18 @@ class ChunkTextSplitter(TextSplitter):
             
         if len(paragraphs) == 1:
             # Обновляем заголовок, если единственный абзац им является
-            if self._is_header(paragraphs[0]):
-                self.current_header = paragraphs[0]
-            yield f"[{self.current_header}]\n{paragraphs[0]}"
+            paragraph = paragraphs[0]
+            if self._is_header(paragraph):
+                self.current_header = paragraph
+
+            # Один длинный абзац тоже должен соблюдать chunk_size.
+            chunks = (
+                self.fallback_splitter.split_text(paragraph)
+                if len(paragraph) > self.config.chunk_size
+                else [paragraph]
+            )
+            for chunk in chunks:
+                yield f"[{self.current_header}]\n{chunk}"
             return
 
         # Перед эмбеддингами сканируем блок и обновляем текущий заголовок, 

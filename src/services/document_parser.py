@@ -1,6 +1,40 @@
+import re
+import unicodedata
 from typing import Generator
-import fitz  # PyMuPDF
+
+import pymupdf as fitz
+from docx import Document
+
 from src.core.interfaces import DocumentParser
+
+
+def normalize_document_text(text: str) -> str:
+    """Мягкая очистка текста без потери регистра, пунктуации и абзацев."""
+    if not text:
+        return ""
+
+    text = unicodedata.normalize("NFKC", text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\u00ad", "")  # мягкий перенос
+
+    # Склеиваем слова, разорванные переносом строки: "инфор-\nмация" -> "информация".
+    text = re.sub(r"(?<=\w)-[ \t]*\n[ \t]*(?=\w)", "", text)
+
+    # Удаляем служебные и невидимые Unicode-символы, сохраняя переносы строк.
+    text = "".join(
+        char
+        for char in text
+        if char in "\n\t" or unicodedata.category(char) not in {"Cc", "Cf"}
+    )
+
+    normalized_paragraphs = []
+    for paragraph in re.split(r"\n[ \t]*\n+", text):
+        lines = [re.sub(r"[ \t]+", " ", line).strip() for line in paragraph.split("\n")]
+        normalized = " ".join(line for line in lines if line)
+        if normalized:
+            normalized_paragraphs.append(normalized)
+
+    return "\n\n".join(normalized_paragraphs)
 
 class PDFDocumentParser(DocumentParser):
     """Промышленная потоковая реализация парсинга PDF без перегрузки RAM."""
@@ -13,37 +47,28 @@ class PDFDocumentParser(DocumentParser):
         try:
             with fitz.open(file_path) as doc:
                 for page in doc:
-                    page_text = page.get_text().strip()
-                    if page_text:
+                    paragraphs = []
+                    for block in page.get_text("blocks", sort=True):
+                        # В PyMuPDF поле block_type == 0 обозначает текст, 1 — изображение.
+                        if len(block) > 6 and block[6] != 0:
+                            continue
+                        cleaned_block = normalize_document_text(str(block[4]))
+                        if cleaned_block:
+                            paragraphs.append(cleaned_block)
+
+                    if paragraphs:
                         has_text = True
-                        
-                        # 1. Заменяем реальные абзацы временным уникальным маркером
-                        cleaned = page_text.replace("\n\n", "||PARAGRAPH||")
-                        # 2. Убираем одиночные переносы строк (которые ломают предложения посреди строки)
-                        cleaned = cleaned.replace("\n", " ")
-                        # 3. Возвращаем правильные двойные переносы строк на место
-                        cleaned = cleaned.replace("||PARAGRAPH||", "\n\n")
-                        # 4. Схлопываем случайные множественные пробелы
-                        cleaned = " ".join(cleaned.split())
-                        # 5. Возвращаем правильный формат для абзацев
-                        cleaned = cleaned.replace(". ", ".\n\n") # Опционально: гарантирует, что точки станут границами
-                        
-                        yield cleaned
+                        yield "\n\n".join(paragraphs)
             
             if not has_text:
                 raise RuntimeError(
                     f"Не удалось извлечь текст из '{file_path}'. "
                     "Возможно, это отсканированный документ без текстового слоя (OCR)."
                 )
-            if not has_text:
-                raise RuntimeError(f"Не удалось извлечь текст из '{file_path}'.")
         except Exception as e:
-            if isinstance(e, RuntimeError): raise e
+            if isinstance(e, RuntimeError):
+                raise
             raise RuntimeError(f"Ошибка при чтении PDF файла '{file_path}': {e}")
-        
-        
-
-from docx import Document
 
 class DocxDocumentParser:
     """Потоковый парсер для документов Microsoft Word (.docx)."""
@@ -59,7 +84,7 @@ class DocxDocumentParser:
             paragraphs_per_block = 5  # Группируем по 5 абзацев в один "экран" текста
 
             for paragraph in doc.paragraphs:
-                text = paragraph.text.strip()
+                text = normalize_document_text(paragraph.text)
                 if text:
                     buffer.append(text)
                 

@@ -31,7 +31,7 @@ vector_store:
   port: 6333
   collection_name: "my_knowledge_base"
   docs_dir: "data/docs"           
-  recreate_on_start: false
+  recreate_on_start: true
   search_mode: "hybrid"   
 
 #  Настройки реранкера 

@@ -105,3 +105,39 @@ mlflow server --host 127.0.0.1 --port 5000
 
 ---
 *Разработано для локального использования с абсолютным упором на приватность ваших данных.*
+
+## 🧪 Автоматизированные retrieval-эксперименты
+
+Пересоздать golden dataset с одним эталонным чанком на вопрос:
+
+```bash
+venv/bin/python scripts/generate_dataset_from_collection.py \
+  --config src/config/config.yaml \
+  --output golden_dataset.json \
+  --questions 20
+```
+
+Матрица запусков находится в `experiments.yaml`. Посмотреть план без запуска моделей:
+
+```bash
+venv/bin/python scripts/run_experiments.py --matrix experiments.yaml --list
+```
+
+Последовательно выполнить всю серию:
+
+```bash
+venv/bin/python scripts/run_experiments.py --matrix experiments.yaml
+```
+
+Продолжить прерванную серию, пропустив уже готовые запуски:
+
+```bash
+venv/bin/python scripts/run_experiments.py --matrix experiments.yaml --resume
+```
+
+Для каждого варианта создаются отдельные MLflow run, YAML-конфиг, лог, CSV/XLSX-отчет и JSON с метриками. Общая сводка сохраняется в `experiment_results/summary.csv`.
+
+Эксперименты ожидают golden dataset, в котором у каждого вопроса есть ровно один
+эталонный чанк в `contexts` и его идентификатор в `source`. Основные retrieval-метрики:
+`id_target_hit_at_k` и `id_target_mrr`. При `--resume` старый результат используется
+только при совпадении датасета и конфигурации запуска.
