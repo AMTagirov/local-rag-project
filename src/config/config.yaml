@@ -1,0 +1,41 @@
+# Основные настройки эксперимента
+experiment_name: "rag_with_reranking_test_top_k=4"
+parser_type: "pdf"
+top_k: 10  # Сколько финальных результатов мы хотим получить на выходе
+
+# Настройки эмбеддингов
+embedding:
+  model_name: "intfloat/multilingual-e5-large"
+  dimension: 1024
+
+# Настройки LLM (Ollama)
+llm:
+  model_name: "qwen2.5:14b"
+  base_url: "http://localhost:11434"
+  num_ctx: 16384
+  temperature: 0.0                    # Полностью убирает случайность
+  top_p: 1.0                          # Отключает стороннюю фильтрацию токенов
+  seed: 42     
+
+# Настройки разбиения текста
+splitter:
+  chunk_size: 1800
+  chunk_overlap: 400
+  strategy: "semantic"                # Или "recursive" для старого режима
+  breakpoint_percentile_threshold: 90 # Порог деления тем
+  block_size: 128                     # Пачка для стриминга против OOM
+
+# Настройки векторной базы данных
+vector_store:
+  host: "localhost"
+  port: 6333
+  collection_name: "my_knowledge_base"
+  docs_dir: "data/docs"           
+  recreate_on_start: false
+  search_mode: "hybrid"   
+
+#  Настройки реранкера 
+reranker:
+  model_name: "BAAI/bge-reranker-base" # Модель Cross-Encoder (скачается автоматически)
+  use_reranker: true                  # Включить или выключить этап переранжирования
+  top_n_retrieval: 50                # Сколько документов достать из Qdrant для анализа реранкером

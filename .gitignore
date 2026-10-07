@@ -1,0 +1,39 @@
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+build/
+dist/
+
+# --- Databases & Vector Stores ---
+# Очень важно: локальное хранилище Qdrant содержит огромные бинарные файлы
+qdrant_storage/
+*.db
+*.sqlite
+
+# --- ML & Experiments (MLflow) ---
+mlruns/
+mlflow.db
+
+# --- Data & Documents ---
+# Игнорируем исходные документы и результаты тестов, 
+# --- Data & Documents ---
+data/
+*.pdf
+*.docx
+*.csv
+*.json
+# Если golden_dataset.json — это важный часть проекта, 
+# раскомментируйте следующую строку:
+# !golden_dataset.json
+
+# --- ML Models ---
+models/
+
+# --- OS & IDE ---
+.DS_Store
+.vscode/
+.idea/
+*.log
