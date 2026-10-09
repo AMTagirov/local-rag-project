@@ -177,14 +177,54 @@ class QdrantService(VectorStore):
     def get_existing_file_names(self, collection_name: Optional[str] = None) -> set:
         target_collection = collection_name or self.config.collection_name
         try:
-            points, _ = self.client.scroll(
-                collection_name=target_collection,
-                limit=10000
-            )
-            return {p.payload.get("file_name") for p in points if p.payload and p.payload.get("file_name")}
+            if not self.collection_exists(target_collection):
+                return set()
+
+            file_names = set()
+            offset = None
+            while True:
+                points, offset = self.client.scroll(
+                    collection_name=target_collection,
+                    limit=256,
+                    offset=offset,
+                    with_payload=["file_name"],
+                    with_vectors=False,
+                )
+                file_names.update(
+                    point.payload.get("file_name")
+                    for point in points
+                    if point.payload and point.payload.get("file_name")
+                )
+                if offset is None:
+                    break
+            return file_names
         except Exception as e:
             print(f"⚠️ Ошибка при проверке существующих файлов: {e}")
             return set()
+
+    def delete_by_file_name(
+        self,
+        file_name: str,
+        collection_name: Optional[str] = None,
+    ) -> None:
+        """Удаляет все чанки документа; используется для отката неудачной загрузки."""
+        target_collection = collection_name or self.config.collection_name
+        if not self.collection_exists(target_collection):
+            return
+        self.client.delete(
+            collection_name=target_collection,
+            points_selector=models.FilterSelector(
+                filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="file_name",
+                            match=models.MatchValue(value=file_name),
+                        )
+                    ]
+                )
+            ),
+            wait=True,
+        )
     
     def _get_already_indexed_files(self, collection_name: str) -> set:
             """
@@ -202,7 +242,6 @@ class QdrantService(VectorStore):
             except Exception as e:
                 print(f"⚠️ Ошибка при проверке существующих файлов: {e}")
                 return set()        
-
 
 
 

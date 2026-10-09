@@ -69,9 +69,61 @@ class ChunkTextSplitter(TextSplitter):
         """
         Потоково разбивает страницы согласно выбранной стратегии.
         """
+        prepared_pages = (
+            self._prepare_structured_page(page_text)
+            for page_text in pages_iterator
+        )
         if self.config.strategy == ChunkingStrategy.RECURSIVE:
-            yield from self._split_recursive_stream(pages_iterator)
-            return
+            raw_chunks = self._split_recursive_stream(prepared_pages)
+        else:
+            raw_chunks = self._split_semantic_stream(prepared_pages)
+
+        yield from self._merge_short_chunks(raw_chunks)
+
+    def _prepare_structured_page(self, page_text: str) -> str:
+        """Делит большие Markdown-таблицы, повторяя заголовок колонок."""
+        if not page_text:
+            return page_text
+
+        prepared_blocks = []
+        for block in re.split(r"\n[ \t]*\n+", page_text):
+            block = block.strip()
+            if not block:
+                continue
+            prepared_blocks.extend(self._split_large_markdown_table(block))
+        return "\n\n".join(prepared_blocks)
+
+    def _split_large_markdown_table(self, block: str) -> List[str]:
+        """Режет длинную таблицу по строкам, сохраняя заголовок в каждой части."""
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        is_table = (
+            len(lines) >= 3
+            and lines[0].startswith("|")
+            and lines[1].startswith("|")
+            and re.fullmatch(r"[|:\- ]+", lines[1]) is not None
+        )
+        if not is_table or len(block) <= self.config.chunk_size:
+            return [block]
+
+        header = lines[:2]
+        parts: List[str] = []
+        current = header.copy()
+
+        for row in lines[2:]:
+            candidate = "\n".join(current + [row])
+            if len(candidate) > self.config.chunk_size and len(current) > 2:
+                parts.append("\n".join(current))
+                current = header + [row]
+            else:
+                current.append(row)
+
+        if len(current) > 2:
+            parts.append("\n".join(current))
+
+        return parts or [block]
+
+    def _split_semantic_stream(self, pages_iterator: Iterable[str]) -> Generator[str, None, None]:
+        """Семантически разбивает поток страниц на чанки."""
 
         current_paragraphs_block = []
         self.current_header = "Общий контекст"  # Базовый заголовок по умолчанию
@@ -97,6 +149,63 @@ class ChunkTextSplitter(TextSplitter):
         # Обрабатываем оставшиеся "хвосты" после завершения книги
         if current_paragraphs_block:
             yield from self._process_local_block(current_paragraphs_block)
+
+    def _merge_short_chunks(self, chunks: Iterable[str]) -> Generator[str, None, None]:
+        """Объединяет короткие соседние чанки без превышения chunk_size.
+
+        Буфер из двух элементов позволяет корректно присоединить короткий
+        последний чанк к предыдущему, сохраняя потоковую обработку документа.
+        """
+        min_size = self.config.chunk_min_size
+        max_size = self.config.chunk_size
+        buffer: List[str] = []
+
+        def can_merge(left: str, right: str) -> bool:
+            return len(left) < min_size or len(right) < min_size
+
+        def merged(left: str, right: str) -> str:
+            return f"{left.rstrip()}\n\n{right.lstrip()}"
+
+        def rebalance(text: str) -> List[str]:
+            """Сдвигает границу между чанками, когда простое слияние невозможно."""
+            lower = max(min_size, len(text) - max_size)
+            upper = min(max_size, len(text) - min_size)
+            target = len(text) // 2
+            candidates = [
+                index
+                for index in range(lower, upper + 1)
+                if text[index - 1:index].isspace() or text[index:index + 1].isspace()
+            ]
+            split_at = min(candidates, key=lambda index: abs(index - target)) if candidates else target
+            return [text[:split_at].strip(), text[split_at:].strip()]
+
+        def normalize_first_pair() -> bool:
+            """Возвращает True, если первые два элемента были изменены."""
+            if not can_merge(buffer[0], buffer[1]):
+                return False
+            combined = merged(buffer[0], buffer[1])
+            if len(combined) <= max_size:
+                buffer[:2] = [combined]
+            else:
+                buffer[:2] = rebalance(combined)
+            return True
+
+        for chunk in chunks:
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            buffer.append(chunk)
+
+            while len(buffer) > 2:
+                if not normalize_first_pair():
+                    yield buffer.pop(0)
+
+        while len(buffer) > 1:
+            if not normalize_first_pair():
+                yield buffer.pop(0)
+
+        if buffer:
+            yield buffer[0]
 
     def _split_recursive_stream(self, pages_iterator: Iterable[str]) -> Generator[str, None, None]:
         """Рекурсивно режет поток, сохраняя overlap между страницами."""

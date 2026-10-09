@@ -1,10 +1,10 @@
 from abc import ABC, abstractmethod
-from typing import List, Any, Optional
+from typing import List, Any, Iterator, Optional
 
 class DocumentParser(ABC):
     """Интерфейс для парсинга документов."""
     @abstractmethod
-    def parse(self, file_path: str) -> str:
+    def parse(self, file_path: str) -> Iterator[str]:
         pass
 
 class TextSplitter(ABC):
@@ -57,5 +57,5 @@ class VectorStore(ABC):
 class LLMService(ABC):
     """Интерфейс для языковой модели (LLM)."""
     @abstractmethod
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, system_prompt: Optional[str] = None) -> str:
         pass

@@ -1,5 +1,5 @@
 import os
-from src.services.document_parser import PDFDocumentParser
+from src.services.document_parser import create_document_parser
 from src.services.text_splitter import ChunkTextSplitter
 from src.services.embedding_service import EmbeddingService
 from src.services.vector_store_service import QdrantService
@@ -27,7 +27,7 @@ def main():
         docs_dir = config.vector_store.docs_dir
 
         # --- 2. ИНИЦИАЛИЗАЦИЯ СЕРВИСОВ ---
-        parser = PDFDocumentParser()
+        parser = create_document_parser(config)
         
         # Шаг А: Сначала создаем модель эмбеддингов
         embedder = EmbeddingService(config.embedding)

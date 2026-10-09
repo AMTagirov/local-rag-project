@@ -1,4 +1,4 @@
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 import ollama
 from src.core.interfaces import LLMService
 from src.config.schema import LLMConfig
@@ -14,7 +14,7 @@ class OllamaLLMService(LLMService):
         # Асинхронный клиент не блокирует event loop Chainlit между токенами.
         self.async_client = ollama.AsyncClient(host=config.base_url)
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, system_prompt: Optional[str] = None) -> str:
         """
         Синхронная генерация ответа (используется в скриптах оценки и датасетов).
         Полностью детерминирована на основе параметров из конфига.
@@ -23,6 +23,7 @@ class OllamaLLMService(LLMService):
             response = self.client.generate(
                 model=self.config.model_name,
                 prompt=prompt,
+                system=system_prompt or "",
                 options={
                     "num_ctx": self.config.num_ctx,
                     "temperature": getattr(self.config, "temperature", 0.0),
@@ -34,7 +35,11 @@ class OllamaLLMService(LLMService):
         except Exception as e:
             raise RuntimeError(f"Ошибка при генерации ответа через Ollama: {e}")
 
-    async def generate_stream(self, prompt: str) -> AsyncGenerator[str, None]:
+    async def generate_stream(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+    ) -> AsyncGenerator[str, None]:
         """
         Потоковая генерация ответа (будет использоваться в веб-интерфейсе app.py).
         Возвращает генератор токенов по мере их создания моделью Qwen.
@@ -43,6 +48,7 @@ class OllamaLLMService(LLMService):
             stream = await self.async_client.generate(
                 model=self.config.model_name,
                 prompt=prompt,
+                system=system_prompt or "",
                 stream=True,
                 options={
                     "num_ctx": self.config.num_ctx,

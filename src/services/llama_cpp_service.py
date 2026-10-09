@@ -1,4 +1,5 @@
 import requests
+from typing import Optional
 from src.core.interfaces import LLMService
 
 class LlamaCppLLMService(LLMService):
@@ -11,7 +12,7 @@ class LlamaCppLLMService(LLMService):
         self.base_url = base_url.rstrip("/")
         self.model_name = model_name
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, system_prompt: Optional[str] = None) -> str:
         """
         Генерирует ответ через OpenAI-совместимый API llama.cpp.
         """
@@ -21,7 +22,11 @@ class LlamaCppLLMService(LLMService):
             
             payload = {
                 "model": self.model_name,
-                "prompt": prompt,
+                "prompt": (
+                    f"{system_prompt}\n\n{prompt}"
+                    if system_prompt
+                    else prompt
+                ),
                 "temperature": 0.7,
                 "max_tokens": 1024,
                 "stop": ["<|endoftext|>", "</s>"] # Добавьте стоп-токены вашей модели

@@ -83,14 +83,21 @@ def check_service(url: str, name: str) -> None:
         raise RuntimeError(f"{name} недоступен по адресу {url}: {error}") from error
 
 
-def build_run_config(base: dict, matrix_name: str, run: dict) -> dict:
+def build_run_config(
+    base: dict,
+    matrix_name: str,
+    collection_name: str,
+    run: dict,
+) -> dict:
     allowed = {
         "name",
         "search_mode",
         "top_n_retrieval",
         "top_k",
         "use_reranker",
-        "reranker_model",
+        "use_query_rewriting",
+        "keep_original_query",
+        "query_rrf_k",
     }
     unknown = set(run) - allowed
     if unknown:
@@ -102,11 +109,15 @@ def build_run_config(base: dict, matrix_name: str, run: dict) -> dict:
     config = deepcopy(base)
     config["experiment_name"] = matrix_name
     config["top_k"] = int(run["top_k"])
+    config["vector_store"]["collection_name"] = collection_name
     config["vector_store"]["search_mode"] = run["search_mode"]
     config["reranker"]["top_n_retrieval"] = int(run["top_n_retrieval"])
     config["reranker"]["use_reranker"] = bool(run["use_reranker"])
-    if "reranker_model" in run:
-        config["reranker"]["model_name"] = run["reranker_model"]
+    query_rewriting = config.setdefault("query_rewriting", {})
+    query_rewriting["enabled"] = bool(run.get("use_query_rewriting", False))
+    query_rewriting["keep_original"] = bool(run.get("keep_original_query", True))
+    query_rewriting["rrf_k"] = int(run.get("query_rrf_k", 60))
+    config.setdefault("document_analysis", {})["enabled"] = False
     config["vector_store"]["recreate_on_start"] = False
     return config
 
@@ -188,23 +199,27 @@ def main() -> int:
     base_config_path = resolve_from_project(matrix["base_config"])
     dataset_path = resolve_from_project(matrix["dataset"])
     output_dir = resolve_from_project(matrix.get("output_dir", "experiment_results"))
+    collection_name = str(matrix.get("collection_name", "")).strip()
     runs = matrix.get("runs", [])
     if not runs:
         parser.error("В матрице нет запусков")
     if not dataset_path.exists():
         parser.error(f"Датасет не найден: {dataset_path}")
+    if not collection_name:
+        parser.error("В матрице не задан непустой collection_name")
 
     names = [run.get("name") for run in runs]
     if any(not name for name in names) or len(names) != len(set(names)):
         parser.error("Каждый запуск должен иметь уникальное непустое имя")
 
     if args.list:
+        print(f"Коллекция: {collection_name}")
         for index, run in enumerate(runs, start=1):
             print(
                 f"{index:02d}. {run['name']}: mode={run['search_mode']}, "
                 f"retrieval={run['top_n_retrieval']}, top_k={run['top_k']}, "
                 f"reranker={run['use_reranker']}, "
-                f"model={run.get('reranker_model', 'base config')}"
+                f"query_rewriting={run.get('use_query_rewriting', False)}"
             )
         return 0
 
@@ -234,7 +249,12 @@ def main() -> int:
         name = slugify(run["name"])
         metrics_path = metrics_dir / f"{name}.json"
         metadata_path = metrics_dir / f"{name}.meta.json"
-        run_config = build_run_config(base_config, matrix["experiment_name"], run)
+        run_config = build_run_config(
+            base_config,
+            matrix["experiment_name"],
+            collection_name,
+            run,
+        )
         signature = run_signature(dataset_sha256, run_config)
         print(f"\n{'=' * 72}\n[{index}/{len(runs)}] {name}\n{'=' * 72}")
 

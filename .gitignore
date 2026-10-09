@@ -26,6 +26,8 @@ experiment_results/
 evaluation_reports/
 evaluation_report_*
 golden_dataset*.json
+test_artifacts/
+Local_RAG_Experiment_Results.png
 
 # Logs and runtime artifacts
 *.log

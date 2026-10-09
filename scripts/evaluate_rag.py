@@ -33,7 +33,7 @@ from langchain_ollama import ChatOllama
 
 # Ваши сервисы
 from src.config.schema import RAGConfig
-from src.services.document_parser import PDFDocumentParser  
+from src.services.document_parser import create_document_parser
 from src.services.text_splitter import ChunkTextSplitter
 from src.services.embedding_service import EmbeddingService
 from src.services.vector_store_service import QdrantService
@@ -64,7 +64,10 @@ def get_rag_predictions(
 
         start_generation = time.perf_counter()
         prompt = pipeline.build_prompt(question, contexts)
-        answer = pipeline.llm.generate(prompt)
+        answer = pipeline.llm.generate(
+            prompt,
+            system_prompt=pipeline.RAG_SYSTEM_PROMPT,
+        )
         generation_time = time.perf_counter() - start_generation
 
         latencies["generation_time"] = generation_time
@@ -189,10 +192,9 @@ def run_evaluation(
     report_dir.mkdir(parents=True, exist_ok=True)
 
     # Гарантированная инициализация парсера на основе конфига
-    if config.parser_type == "pdf":
-        parser = PDFDocumentParser()
-    else:
-        parser = PDFDocumentParser() # Фолбэк-заглушка
+    # Оценка не парсит документы; PDF-парсер используется как базовая зависимость
+    # пайплайна, а реальная индексация в режиме auto выбирает парсер по расширению.
+    parser = create_document_parser(config)
 
     print(f"🧪 Запуск оценки для модели {llm_model_name} на коллекции '{collection_name}'")
     
@@ -200,16 +202,24 @@ def run_evaluation(
         mlflow.log_params({
             "llm_model": llm_model_name,
             "collection": collection_name,
-            "parser_type": config.parser_type,
+            "parser_type": config.parser_type.value,
             "embedding_model": config.embedding.model_name,
             "chunking_strategy": config.splitter.strategy.value,
             "chunk_size": config.splitter.chunk_size,
+            "chunk_min_size": config.splitter.chunk_min_size,
             "chunk_overlap": config.splitter.chunk_overlap,
             "search_mode": config.vector_store.search_mode.value,
             "top_k": config.top_k,
             "use_reranker": config.reranker.use_reranker,
             "reranker_model": config.reranker.model_name,
             "top_n_retrieval": config.reranker.top_n_retrieval,
+            "query_rewriting": config.query_rewriting.enabled,
+            "query_rewriting_keep_original": config.query_rewriting.keep_original,
+            "query_rewriting_rrf_k": config.query_rewriting.rrf_k,
+            "document_analysis": config.document_analysis.enabled,
+            "formula_recognition": config.document_analysis.use_formula_recognition,
+            "table_recognition": config.document_analysis.use_table_recognition,
+            "chart_recognition": config.document_analysis.use_chart_recognition,
         })
         
         # --- 1. ИНИЦИАЛИЗАЦИЯ ПАЙПЛАЙНА (ОПТИМИЗИРОВАНО: Сквозные зависимости интерфейсов) ---

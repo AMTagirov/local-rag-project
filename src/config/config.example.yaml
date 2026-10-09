@@ -1,7 +1,7 @@
 # Основные настройки эксперимента
 experiment_name: "rag_with_reranking_test_top_k=4"
-parser_type: "pdf"
-top_k: 4  # Сколько финальных результатов мы хотим получить на выходе
+parser_type: "auto"  # auto выбирает PDF/DOCX-парсер по расширению файла
+top_k: 10  # Сколько финальных результатов мы хотим получить на выходе
 
 # Настройки эмбеддингов
 embedding:
@@ -20,6 +20,7 @@ llm:
 # Настройки разбиения текста
 splitter:
   chunk_size: 1800
+  chunk_min_size: 500                 # Короткие соседние чанки объединяются до этого размера
   chunk_overlap: 400
   strategy: "semantic"                # Или "recursive" для старого режима
   breakpoint_percentile_threshold: 90 # Порог деления тем
@@ -36,6 +37,32 @@ vector_store:
 
 #  Настройки реранкера 
 reranker:
-  model_name: "BAAI/bge-reranker-base" # Модель Cross-Encoder (скачается автоматически)
+  model_name: "BAAI/bge-reranker-v2-m3" # Мультиязычный Cross-Encoder
   use_reranker: true                  # Включить или выключить этап переранжирования
-  top_n_retrieval: 35                # Сколько документов достать из Qdrant для анализа реранкером
+  top_n_retrieval: 50                # Сколько документов достать из Qdrant для анализа реранкером
+
+# Опциональное уточнение пользовательского запроса перед поиском
+query_rewriting:
+  enabled: false                     # true включает дополнительный вызов LLM
+  keep_original: true                # Искать по исходному и переписанному запросам
+  rrf_k: 60                          # Параметр объединения двух выдач через RRF
+
+document_analysis:
+  enabled: false
+  device: "cpu"
+  engine: "onnxruntime"
+  ocr_language: "ru"
+  ocr_version: "PP-OCRv5"
+  prefer_native_pdf_text: true
+  native_text_min_chars: 80
+  use_formula_recognition: false
+  formula_model_name: "PP-FormulaNet_plus-M"
+  formula_filter_enabled: true
+  formula_filter_threshold: 2
+  formula_render_dpi: 250
+  # Формулы + таблицы одновременно требуют много RAM; включайте по задаче.
+  use_table_recognition: false
+  use_chart_recognition: false
+  save_images: true
+  assets_dir: "data/extracted"
+  cache_dir: "data/models/paddlex"

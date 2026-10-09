@@ -4,7 +4,7 @@ import random
 from typing import List, Dict, Any
 
 from src.config.schema import RAGConfig
-from src.services.document_parser import PDFDocumentParser
+from src.services.document_parser import create_document_parser
 from src.services.text_splitter import ChunkTextSplitter
 from src.services.embedding_service import EmbeddingService
 from src.services.llm_service import OllamaLLMService
@@ -41,7 +41,7 @@ def generate_synthetic_dataset(
     """
     
     # --- 1. ИНИЦИАЛИЗАЦИЯ СЕРВИСОВ (ИСПРАВЛЕНО: соблюдены зависимости) ---
-    parser = PDFDocumentParser()
+    parser = create_document_parser(config)
     embedder = EmbeddingService(config.embedding)
     
     # Передаем embedder в семантический сплиттер.

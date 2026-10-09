@@ -2,6 +2,7 @@ experiment_name: "retrieval_optimization"
 base_config: "src/config/config.yaml"
 dataset: "golden_dataset.json"
 output_dir: "experiment_results"
+collection_name: "my_knowledge_base"
 
 # Эти параметры не требуют переиндексации: коллекция остаётся одной и той же.
 runs:
@@ -41,9 +42,27 @@ runs:
     top_k: 10
     use_reranker: false
 
-  - name: "hybrid_k10_bge_v2_m3"
+  - name: "qr_baseline"
     search_mode: "hybrid"
     top_n_retrieval: 50
-    top_k: 10
+    top_k: 6
     use_reranker: true
-    reranker_model: "BAAI/bge-reranker-v2-m3"
+    use_query_rewriting: false
+
+  - name: "qr_rewrite_only"
+    search_mode: "hybrid"
+    top_n_retrieval: 50
+    top_k: 6
+    use_reranker: true
+    use_query_rewriting: true
+    keep_original_query: false
+    query_rrf_k: 60
+
+  - name: "qr_original_plus_rewrite"
+    search_mode: "hybrid"
+    top_n_retrieval: 50
+    top_k: 6
+    use_reranker: true
+    use_query_rewriting: true
+    keep_original_query: true
+    query_rrf_k: 60

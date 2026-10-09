@@ -1,0 +1,10 @@
+paddleocr[doc-parser]==3.7.0
+# RTX 50xx / Blackwell: устанавливать из официального CUDA 13.0 индекса:
+# python -m pip install -r requirements-ocr.txt \
+#   --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/
+# Если в том же venv установлен torch 2.14, после этого восстановите его ABI:
+# python -m pip install nvidia-cudnn-cu13==9.24.0.43 \
+#   nvidia-nccl-cu13==2.30.7 cuda-bindings==13.0.3
+paddlepaddle-gpu==3.3.1
+onnxruntime==1.30.0
+Pillow==12.3.0
